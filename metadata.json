@@ -1,0 +1,6 @@
+{
+  "name": "Elevator Sales CRM",
+  "description": "Comprehensive CRM for elevator companies to manage leads, site visits, technical enquiries, quotations, follow-ups, and sales analytics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
