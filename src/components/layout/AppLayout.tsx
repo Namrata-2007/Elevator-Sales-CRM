@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   LayoutDashboard,
   Users,
@@ -16,15 +16,12 @@ import {
   Menu,
   X,
   Search,
-  CheckCircle2,
+  Check,
   UserCheck,
   PhoneCall,
-  Compass,
-  FileText,
   Shield,
-  Briefcase,
-  Layers,
   Activity,
+  Loader2,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext.tsx';
 import { UserRole, FollowUp } from '../../types/crm.ts';
@@ -42,6 +39,53 @@ interface AppLayoutProps {
   onOpenLogCall?: () => void;
 }
 
+const ROLE_PERSONAS: Array<{
+  role: UserRole;
+  label: string;
+  subtitle: string;
+}> = [
+  {
+    role: 'admin',
+    label: 'Super Admin / Owner',
+    subtitle: 'Full company authority & configuration',
+  },
+  {
+    role: 'manager',
+    label: 'Sales Manager',
+    subtitle: 'Team oversight & quotation approvals',
+  },
+  {
+    role: 'executive',
+    label: 'Sales Executive',
+    subtitle: 'Field leads, visits & measurements',
+  },
+  {
+    role: 'telecaller',
+    label: 'Telecalling Executive',
+    subtitle: 'Lead generation & outbound calls',
+  },
+  {
+    role: 'engineer',
+    label: 'Technical Engineer',
+    subtitle: 'Hoistway specs & drawing reviews',
+  },
+  {
+    role: 'commercial',
+    label: 'Commercial Executive',
+    subtitle: 'Commercial bids & quote revisions',
+  },
+  {
+    role: 'director',
+    label: 'Managing Director',
+    subtitle: 'Executive pipeline & audit analytics',
+  },
+  {
+    role: 'customer',
+    label: 'Builder / Customer Portal',
+    subtitle: 'Lift specifications & proposals',
+  },
+];
+
 export const AppLayout: React.FC<AppLayoutProps> = ({
   currentTab,
   setCurrentTab,
@@ -52,30 +96,87 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
   onOpenNewQuotation,
   onOpenLogCall,
 }) => {
-  const { user, loginWithRole, logout, trackPage } = useAuth();
+  const { user, logout, switchRole, trackPage } = useAuth();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [roleMenuOpen, setRoleMenuOpen] = useState(false);
+  const [isSwitchingRole, setIsSwitchingRole] = useState(false);
+  const [roleSwitchError, setRoleSwitchError] = useState<string | null>(null);
   const [notifOpen, setNotifOpen] = useState(false);
   const [quickActionOpen, setQuickActionOpen] = useState(false);
-  const [roleMenuOpen, setRoleMenuOpen] = useState(false);
   const [urgentFollowUps, setUrgentFollowUps] = useState<FollowUp[]>([]);
 
-  const fetchUrgentTasks = async () => {
+  const roleMenuRef = useRef<HTMLDivElement>(null);
+  const quickActionRef = useRef<HTMLDivElement>(null);
+  const notifRef = useRef<HTMLDivElement>(null);
+
+  const userRole: UserRole = user?.role || 'executive';
+
+  const fetchUrgentTasks = useCallback(async () => {
     try {
       const all = await api.getFollowUps();
       const urgent = all.filter((f) => f.bucket === 'Overdue' || f.bucket === 'Today');
       setUrgentFollowUps(urgent);
     } catch {
-      // ignore
+      // Non-blocking background poll
     }
-  };
+  }, []);
 
   useEffect(() => {
     fetchUrgentTasks();
     const timer = setInterval(fetchUrgentTasks, 30000);
     return () => clearInterval(timer);
+  }, [fetchUrgentTasks, user?.id, userRole]);
+
+  // Dismiss dropdowns on click-outside or Escape key
+  useEffect(() => {
+    const handleMouseDown = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (roleMenuRef.current && !roleMenuRef.current.contains(target)) {
+        setRoleMenuOpen(false);
+      }
+      if (quickActionRef.current && !quickActionRef.current.contains(target)) {
+        setQuickActionOpen(false);
+      }
+      if (notifRef.current && !notifRef.current.contains(target)) {
+        setNotifOpen(false);
+      }
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setRoleMenuOpen(false);
+        setQuickActionOpen(false);
+        setNotifOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleMouseDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleMouseDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
   }, []);
 
-  const userRole = user?.role || 'executive';
+  const handleSelectRole = async (targetRole: UserRole) => {
+    if (targetRole === userRole) {
+      setRoleMenuOpen(false);
+      return;
+    }
+
+    setIsSwitchingRole(true);
+    setRoleSwitchError(null);
+    try {
+      await switchRole(targetRole);
+      setRoleMenuOpen(false);
+      setMobileMenuOpen(false);
+      setCurrentTab('dashboard');
+    } catch (err: any) {
+      setRoleSwitchError(err?.message || 'Unable to switch role');
+    } finally {
+      setIsSwitchingRole(false);
+    }
+  };
 
   // Dynamic Navigation based on Role & Permissions
   const getNavItems = () => {
@@ -187,33 +288,9 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
 
   const navItems = getNavItems();
 
-  const handleRoleSwitch = async (role: UserRole) => {
-    setRoleMenuOpen(false);
-    await loginWithRole(role);
-    window.location.reload();
-  };
-
   const getRoleDisplayName = (r: UserRole) => {
-    switch (r) {
-      case 'admin':
-        return 'Super Admin / Owner';
-      case 'manager':
-        return 'Sales Manager';
-      case 'executive':
-        return 'Sales Executive';
-      case 'telecaller':
-        return 'Telecalling Lead Gen';
-      case 'engineer':
-        return 'Technical / Enquiry Eng';
-      case 'commercial':
-        return 'Commercial & Bids Exec';
-      case 'director':
-        return 'Managing Director';
-      case 'customer':
-        return 'Builder / Customer Portal';
-      default:
-        return r;
-    }
+    const match = ROLE_PERSONAS.find((item) => item.role === r);
+    return match ? match.label : r;
   };
 
   return (
@@ -228,105 +305,151 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
 
       {/* Sidebar Navigation */}
       <aside
-        className={`fixed inset-y-0 left-0 z-50 w-64 bg-slate-900 text-slate-300 flex flex-col transition-transform duration-300 ease-in-out lg:static lg:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-50 w-72 bg-slate-900 text-slate-300 flex flex-col border-r border-slate-800 transition-transform duration-300 ease-in-out lg:static lg:translate-x-0 ${
           mobileMenuOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
         {/* Brand Header */}
-        <div className="h-16 flex items-center justify-between px-5 border-b border-slate-800 bg-slate-950/40">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-blue-700 to-indigo-600 flex items-center justify-center text-white shadow-md shadow-blue-900/40 border border-blue-400/30">
+        <div className="h-16 flex items-center justify-between px-4 border-b border-slate-800 bg-slate-950/50 shrink-0">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-9 h-9 rounded-xl bg-blue-600 flex items-center justify-center text-white shadow-sm shrink-0">
               <Building2 className="w-5 h-5" />
             </div>
-            <div>
-              <div className="text-white font-bold tracking-tight text-sm flex items-center gap-1.5">
+            <div className="min-w-0">
+              <div className="text-white font-bold tracking-tight text-sm truncate">
                 APEX ELEVATORS
               </div>
-              <div className="text-[10px] text-blue-400 font-medium tracking-wide">
-                ENTERPRISE RBAC CRM
+              <div className="text-[11px] text-slate-400 font-medium truncate">
+                Sales & Operations CRM
               </div>
             </div>
           </div>
           <button
             onClick={() => setMobileMenuOpen(false)}
-            className="lg:hidden text-slate-400 hover:text-white"
+            className="lg:hidden p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800"
+            aria-label="Close navigation menu"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Role Persona Switcher Widget */}
-        <div className="px-3 pt-3 pb-2 border-b border-slate-800/80">
-          <div className="bg-slate-800/60 rounded-xl p-2.5 border border-slate-700/60 text-xs">
-            <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1 flex items-center justify-between">
-              <span>Active Job Role</span>
-              <span
-                className="text-[10px] text-blue-400 hover:underline cursor-pointer font-bold"
-                onClick={() => setRoleMenuOpen(!roleMenuOpen)}
-              >
-                Switch Role ▾
-              </span>
-            </div>
+        {/* Active Job Role & Persona Switcher */}
+        <div ref={roleMenuRef} className="relative px-4 py-3.5 border-b border-slate-800 shrink-0">
+          <div className="flex items-center justify-between gap-2 mb-1.5">
+            <span className="text-[11px] font-medium text-slate-400 tracking-wide">
+              Active Job Role
+            </span>
+            <button
+              type="button"
+              onClick={() => setRoleMenuOpen((prev) => !prev)}
+              disabled={isSwitchingRole}
+              className="text-[11px] font-semibold text-blue-400 hover:text-blue-300 transition-colors cursor-pointer disabled:opacity-50"
+            >
+              {roleMenuOpen ? 'Close' : 'Switch role'}
+            </button>
+          </div>
 
-            <div className="relative">
-              <button
-                onClick={() => setRoleMenuOpen(!roleMenuOpen)}
-                className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-left text-white hover:border-blue-500 transition-colors"
-              >
-                <div className="flex items-center gap-2 min-w-0">
-                  <UserCheck className="w-3.5 h-3.5 text-blue-400 shrink-0" />
-                  <span className="font-semibold text-xs truncate">
-                    {getRoleDisplayName(userRole)}
-                  </span>
+          <button
+            type="button"
+            onClick={() => setRoleMenuOpen((prev) => !prev)}
+            disabled={isSwitchingRole}
+            aria-expanded={roleMenuOpen}
+            aria-haspopup="listbox"
+            className={`w-full flex items-center justify-between gap-2.5 px-3 py-2.5 rounded-xl bg-slate-800/90 hover:bg-slate-800 border text-left transition-all cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+              roleMenuOpen
+                ? 'border-blue-500/80 ring-2 ring-blue-500/20'
+                : 'border-slate-700/90 hover:border-slate-600'
+            }`}
+          >
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="w-7 h-7 rounded-lg bg-blue-500/15 text-blue-400 flex items-center justify-center shrink-0">
+                {isSwitchingRole ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <UserCheck className="w-4 h-4" />
+                )}
+              </div>
+              <div className="min-w-0">
+                <div className="text-xs font-semibold text-white truncate">
+                  {getRoleDisplayName(userRole)}
                 </div>
-                <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-              </button>
+                <div className="text-[11px] text-slate-400 truncate mt-0.5">
+                  {user?.department || 'Operations'}
+                  <span className="mx-1.5 text-slate-600" aria-hidden="true">
+                    ·
+                  </span>
+                  {user?.region || 'HQ'}
+                </div>
+              </div>
+            </div>
+            <ChevronDown
+              className={`w-4 h-4 text-slate-400 shrink-0 transition-transform duration-200 ${
+                roleMenuOpen ? 'rotate-180 text-blue-400' : ''
+              }`}
+            />
+          </button>
 
-              {roleMenuOpen && (
-                <div className="absolute left-0 right-0 top-full mt-1 bg-slate-850 rounded-xl shadow-2xl border border-slate-700 py-1.5 z-50 max-h-80 overflow-y-auto">
-                  <div className="px-3 py-1 text-[10px] font-bold text-slate-400 uppercase">
-                    Select CRM Role Persona
-                  </div>
+          {roleSwitchError && (
+            <p className="mt-1.5 text-[11px] text-rose-400 leading-snug">{roleSwitchError}</p>
+          )}
 
-                  {[
-                    { r: 'admin', title: 'Super Admin / Owner', desc: 'Full authority & configuration' },
-                    { r: 'manager', title: 'Sales Manager', desc: 'Team oversight & quote approvals' },
-                    { r: 'executive', title: 'Sales Executive', desc: 'Field leads & measurements' },
-                    { r: 'telecaller', title: 'Telecalling Executive', desc: 'Lead generation & calls' },
-                    { r: 'engineer', title: 'Technical Engineer', desc: 'Hoistway & drawing reviews' },
-                    { r: 'commercial', title: 'Commercial Executive', desc: 'Quotation bids & revisions' },
-                    { r: 'director', title: 'Managing Director', desc: 'Executive revenue & analytics' },
-                    { r: 'customer', title: 'Builder Portal', desc: 'Client requirement tracking' },
-                  ].map((item) => (
+          {/* Solid Opaque Role Switcher Popover */}
+          {roleMenuOpen && (
+            <div
+              role="listbox"
+              aria-label="Select CRM Role Persona"
+              className="absolute left-3 right-3 top-full mt-1.5 z-50 rounded-xl bg-slate-950 border border-slate-700 shadow-2xl shadow-black/80 ring-1 ring-white/10 overflow-hidden"
+            >
+              <div className="px-3.5 py-2 border-b border-slate-800 bg-slate-900">
+                <span className="text-[11px] font-semibold text-slate-300">
+                  Select CRM Role Persona
+                </span>
+              </div>
+
+              <div className="py-1 max-h-[340px] overflow-y-auto dark-scrollbar divide-y divide-slate-800/60">
+                {ROLE_PERSONAS.map((item) => {
+                  const isSelected = item.role === userRole;
+                  return (
                     <button
-                      key={item.r}
-                      onClick={() => handleRoleSwitch(item.r as UserRole)}
-                      className={`w-full px-3 py-2 text-left text-xs flex flex-col hover:bg-slate-800 transition-colors ${
-                        userRole === item.r ? 'bg-blue-900/30 text-blue-400 font-semibold' : 'text-slate-300'
+                      key={item.role}
+                      type="button"
+                      role="option"
+                      aria-selected={isSelected}
+                      disabled={isSwitchingRole}
+                      onClick={() => handleSelectRole(item.role)}
+                      className={`w-full px-3.5 py-2.5 text-left flex items-center justify-between gap-2.5 transition-colors cursor-pointer disabled:opacity-60 ${
+                        isSelected
+                          ? 'bg-blue-600/20 text-white'
+                          : 'text-slate-200 hover:bg-slate-800/90'
                       }`}
                     >
-                      <div className="flex items-center justify-between">
-                        <span>{item.title}</span>
-                        {userRole === item.r && <CheckCircle2 className="w-3.5 h-3.5 text-blue-400" />}
+                      <div className="min-w-0">
+                        <div
+                          className={`text-xs font-semibold truncate ${
+                            isSelected ? 'text-blue-300' : 'text-slate-100'
+                          }`}
+                        >
+                          {item.label}
+                        </div>
+                        <div className="text-[11px] text-slate-400 truncate mt-0.5">
+                          {item.subtitle}
+                        </div>
                       </div>
-                      <span className="text-[10px] text-slate-400 font-normal">{item.desc}</span>
+                      {isSelected && (
+                        <span className="w-5 h-5 rounded-full bg-blue-500/20 text-blue-400 flex items-center justify-center shrink-0">
+                          <Check className="w-3.5 h-3.5" />
+                        </span>
+                      )}
                     </button>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {user?.department && (
-              <div className="text-[10px] text-slate-400 mt-1.5 flex items-center justify-between">
-                <span>Dept: {user.department}</span>
-                <span className="text-slate-500">{user.region || 'HQ'}</span>
+                  );
+                })}
               </div>
-            )}
-          </div>
+            </div>
+          )}
         </div>
 
         {/* Dynamic Navigation Links */}
-        <nav className="flex-1 px-3 py-3 space-y-1 overflow-y-auto">
+        <nav className="flex-1 px-3 py-3 space-y-1 overflow-y-auto dark-scrollbar">
           {navItems.map((item) => {
             const Icon = item.icon;
             const active = currentTab === item.id;
@@ -338,23 +461,23 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
                   trackPage(item.label, `/${item.id}`);
                   setMobileMenuOpen(false);
                 }}
-                className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all group ${
+                className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium transition-colors group cursor-pointer ${
                   active
-                    ? 'bg-blue-600 text-white shadow-md shadow-blue-700/20'
-                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-800/70'
+                    ? 'bg-blue-600 text-white shadow-sm'
+                    : 'text-slate-300 hover:text-white hover:bg-slate-800/80'
                 }`}
               >
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 min-w-0">
                   <Icon
-                    className={`w-4 h-4 transition-colors ${
+                    className={`w-4 h-4 shrink-0 transition-colors ${
                       active ? 'text-white' : 'text-slate-400 group-hover:text-slate-200'
                     }`}
                   />
-                  <span>{item.label}</span>
+                  <span className="truncate">{item.label}</span>
                 </div>
                 {item.badge !== undefined && (
                   <span
-                    className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${
+                    className={`text-[11px] font-bold px-1.5 py-0.5 rounded-md shrink-0 ${
                       active ? 'bg-white text-blue-700' : 'bg-rose-500 text-white'
                     }`}
                   >
@@ -366,22 +489,22 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
           })}
         </nav>
 
-        {/* Active User Card & Sign Out */}
-        <div className="p-3 border-t border-slate-800 bg-slate-950/40">
-          <div className="flex items-center justify-between p-2 rounded-xl bg-slate-800/40 border border-slate-800">
-            <div className="min-w-0 pr-2">
+        {/* Active User Footer & Sign Out */}
+        <div className="px-4 py-3 border-t border-slate-800 bg-slate-950/50 shrink-0">
+          <div className="flex items-center justify-between gap-2">
+            <div className="min-w-0">
               <div className="text-xs font-semibold text-white truncate">
-                {user?.name || 'Active User'}
+                {user?.name || 'Authenticated User'}
               </div>
-              <div className="text-[11px] text-slate-400 truncate">{user?.email}</div>
-              <div className="mt-1">
-                <StatusBadge status={userRole} size="sm" />
+              <div className="text-[11px] text-slate-400 truncate mt-0.5">
+                {user?.email}
               </div>
             </div>
             <button
               onClick={() => logout()}
               title="Sign Out"
-              className="p-2 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-950/30 transition-colors"
+              aria-label="Sign Out"
+              className="p-2 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-950/40 transition-colors shrink-0 cursor-pointer"
             >
               <LogOut className="w-4 h-4" />
             </button>
@@ -397,11 +520,12 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
             <button
               onClick={() => setMobileMenuOpen(true)}
               className="p-2 -ml-2 rounded-lg text-slate-600 hover:text-slate-900 lg:hidden"
+              aria-label="Open navigation menu"
             >
               <Menu className="w-5 h-5" />
             </button>
-            <div className="hidden sm:flex items-center gap-2 text-slate-400 bg-slate-100 rounded-xl px-3 py-1.5 border border-slate-200 w-64 md:w-80">
-              <Search className="w-4 h-4 text-slate-400" />
+            <div className="hidden sm:flex items-center gap-2 text-slate-400 bg-slate-100 rounded-xl px-3 py-2 border border-slate-200 w-64 md:w-80 focus-within:bg-white focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-500/15 transition-all">
+              <Search className="w-4 h-4 text-slate-400 shrink-0" />
               <input
                 type="text"
                 placeholder="Search authorized records..."
@@ -415,19 +539,19 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center gap-2.5">
-            {/* Role Badge in Header */}
-            <div className="hidden md:flex items-center gap-2 px-3 py-1 rounded-xl bg-slate-100 border border-slate-200 text-xs">
-              <span className="text-slate-500 font-medium">Access Level:</span>
-              <StatusBadge status={userRole} size="sm" />
+          <div className="flex items-center gap-3">
+            {/* Clean Unboxed Access Level Metadata */}
+            <div className="hidden md:flex items-center gap-1.5 text-xs text-slate-500 pr-1">
+              <span>Role:</span>
+              <span className="font-semibold text-slate-800">{getRoleDisplayName(userRole)}</span>
             </div>
 
             {/* Role-Specific Quick Action Button */}
             {userRole !== 'director' && userRole !== 'customer' && (
-              <div className="relative">
+              <div ref={quickActionRef} className="relative">
                 <button
-                  onClick={() => setQuickActionOpen(!quickActionOpen)}
-                  className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-medium text-xs sm:text-sm px-3 sm:px-3.5 py-2 rounded-xl shadow-xs transition-colors"
+                  onClick={() => setQuickActionOpen((prev) => !prev)}
+                  className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-medium text-xs sm:text-sm px-3.5 py-2 rounded-xl shadow-xs transition-colors cursor-pointer"
                 >
                   <Plus className="w-4 h-4" />
                   <span className="hidden sm:inline">New Action</span>
@@ -436,35 +560,44 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
 
                 {quickActionOpen && (
                   <div
-                    className="absolute right-0 mt-2 w-52 bg-white rounded-xl shadow-xl border border-slate-200 py-1.5 z-30 animate-in fade-in zoom-in-95"
+                    className="absolute right-0 mt-2 w-56 bg-white rounded-xl shadow-xl border border-slate-200 py-1.5 z-30"
                     onClick={() => setQuickActionOpen(false)}
                   >
-                    {(userRole === 'admin' || userRole === 'manager' || userRole === 'executive' || userRole === 'telecaller') && (
+                    {(userRole === 'admin' ||
+                      userRole === 'manager' ||
+                      userRole === 'executive' ||
+                      userRole === 'telecaller') && (
                       <button
                         onClick={onOpenNewLead}
-                        className="w-full px-4 py-2 text-left text-xs sm:text-sm text-slate-700 hover:bg-blue-50 hover:text-blue-700 flex items-center gap-2.5"
+                        className="w-full px-4 py-2 text-left text-xs sm:text-sm text-slate-700 hover:bg-blue-50 hover:text-blue-700 flex items-center gap-2.5 cursor-pointer"
                       >
-                        <Users className="w-4 h-4 text-blue-600" />
+                        <Users className="w-4 h-4 text-blue-600 shrink-0" />
                         <span>Add New Lead</span>
                       </button>
                     )}
 
-                    {(userRole === 'admin' || userRole === 'manager' || userRole === 'executive' || userRole === 'engineer') && (
+                    {(userRole === 'admin' ||
+                      userRole === 'manager' ||
+                      userRole === 'executive' ||
+                      userRole === 'engineer') && (
                       <button
                         onClick={onOpenScheduleVisit}
-                        className="w-full px-4 py-2 text-left text-xs sm:text-sm text-slate-700 hover:bg-blue-50 hover:text-blue-700 flex items-center gap-2.5"
+                        className="w-full px-4 py-2 text-left text-xs sm:text-sm text-slate-700 hover:bg-blue-50 hover:text-blue-700 flex items-center gap-2.5 cursor-pointer"
                       >
-                        <CalendarCheck className="w-4 h-4 text-indigo-600" />
+                        <CalendarCheck className="w-4 h-4 text-indigo-600 shrink-0" />
                         <span>Schedule Site Visit</span>
                       </button>
                     )}
 
-                    {(userRole === 'admin' || userRole === 'manager' || userRole === 'executive' || userRole === 'engineer') && (
+                    {(userRole === 'admin' ||
+                      userRole === 'manager' ||
+                      userRole === 'executive' ||
+                      userRole === 'engineer') && (
                       <button
                         onClick={onOpenNewEnquiry}
-                        className="w-full px-4 py-2 text-left text-xs sm:text-sm text-slate-700 hover:bg-blue-50 hover:text-blue-700 flex items-center gap-2.5"
+                        className="w-full px-4 py-2 text-left text-xs sm:text-sm text-slate-700 hover:bg-blue-50 hover:text-blue-700 flex items-center gap-2.5 cursor-pointer"
                       >
-                        <FileSpreadsheet className="w-4 h-4 text-sky-600" />
+                        <FileSpreadsheet className="w-4 h-4 text-sky-600 shrink-0" />
                         <span>Technical Lift Enquiry</span>
                       </button>
                     )}
@@ -472,9 +605,9 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
                     {(userRole === 'admin' || userRole === 'manager' || userRole === 'commercial') && (
                       <button
                         onClick={onOpenNewQuotation}
-                        className="w-full px-4 py-2 text-left text-xs sm:text-sm text-slate-700 hover:bg-blue-50 hover:text-blue-700 flex items-center gap-2.5"
+                        className="w-full px-4 py-2 text-left text-xs sm:text-sm text-slate-700 hover:bg-blue-50 hover:text-blue-700 flex items-center gap-2.5 cursor-pointer"
                       >
-                        <FileCheck2 className="w-4 h-4 text-emerald-600" />
+                        <FileCheck2 className="w-4 h-4 text-emerald-600 shrink-0" />
                         <span>Prepare Commercial Bid</span>
                       </button>
                     )}
@@ -482,9 +615,9 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
                     {(userRole === 'telecaller' || userRole === 'executive') && onOpenLogCall && (
                       <button
                         onClick={onOpenLogCall}
-                        className="w-full px-4 py-2 text-left text-xs sm:text-sm text-slate-700 hover:bg-blue-50 hover:text-blue-700 flex items-center gap-2.5"
+                        className="w-full px-4 py-2 text-left text-xs sm:text-sm text-slate-700 hover:bg-blue-50 hover:text-blue-700 flex items-center gap-2.5 cursor-pointer"
                       >
-                        <PhoneCall className="w-4 h-4 text-emerald-600" />
+                        <PhoneCall className="w-4 h-4 text-emerald-600 shrink-0" />
                         <span>Record Customer Call</span>
                       </button>
                     )}
@@ -494,21 +627,22 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
             )}
 
             {/* In-App Notifications for Overdue / Today's Follow-ups */}
-            <div className="relative">
+            <div ref={notifRef} className="relative">
               <button
-                onClick={() => setNotifOpen(!notifOpen)}
-                className="relative p-2 rounded-xl text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-colors"
+                onClick={() => setNotifOpen((prev) => !prev)}
+                className="relative p-2 rounded-xl text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-colors cursor-pointer"
                 title="Follow-up Notifications"
+                aria-label="Follow-up Notifications"
               >
                 <Bell className="w-5 h-5" />
                 {urgentFollowUps.length > 0 && (
-                  <span className="absolute top-1.5 right-1.5 w-2.5 h-2.5 rounded-full bg-rose-600 ring-2 ring-white animate-pulse" />
+                  <span className="absolute top-1.5 right-1.5 w-2.5 h-2.5 rounded-full bg-rose-600 ring-2 ring-white" />
                 )}
               </button>
 
               {notifOpen && (
                 <div
-                  className="absolute right-0 mt-2 w-80 sm:w-96 bg-white rounded-2xl shadow-2xl border border-slate-200 p-4 z-40 animate-in fade-in"
+                  className="absolute right-0 mt-2 w-80 sm:w-96 bg-white rounded-2xl shadow-2xl border border-slate-200 p-4 z-40"
                   onClick={(e) => e.stopPropagation()}
                 >
                   <div className="flex items-center justify-between pb-3 border-b border-slate-100">
@@ -516,15 +650,15 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
                       <ClockAlert className="w-4 h-4 text-amber-600" />
                       Pending Follow-up Alerts
                     </div>
-                    <span className="text-xs bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full font-medium">
-                      {urgentFollowUps.length} Due
+                    <span className="text-xs font-semibold text-amber-700">
+                      {urgentFollowUps.length} due
                     </span>
                   </div>
 
-                  <div className="max-h-72 overflow-y-auto divide-y divide-slate-100 py-2">
+                  <div className="max-h-72 overflow-y-auto light-scrollbar divide-y divide-slate-100 py-2">
                     {urgentFollowUps.length === 0 ? (
                       <div className="py-6 text-center text-xs text-slate-400">
-                        No pending follow-ups overdue or due today!
+                        No pending follow-ups overdue or due today.
                       </div>
                     ) : (
                       urgentFollowUps.map((flw) => (
@@ -541,7 +675,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
                             <StatusBadge status={flw.bucket || 'Today'} size="sm" />
                           </div>
                           <div className="text-[11px] text-slate-500 truncate mt-0.5">
-                            {flw.projectName} • Due: {flw.dueDate}
+                            {flw.projectName} · Due {flw.dueDate}
                           </div>
                           <div className="text-xs text-slate-700 line-clamp-1 mt-1 bg-slate-100 p-1.5 rounded">
                             {flw.followUpNotes}
@@ -557,7 +691,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
                         setCurrentTab('followups');
                         setNotifOpen(false);
                       }}
-                      className="text-xs text-blue-600 hover:text-blue-800 font-medium"
+                      className="text-xs text-blue-600 hover:text-blue-800 font-medium cursor-pointer"
                     >
                       View all follow-ups →
                     </button>

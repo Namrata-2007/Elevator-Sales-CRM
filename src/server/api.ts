@@ -80,35 +80,32 @@ apiRouter.post('/auth/login', async (req: Request, res: Response) => {
   const ua = (req.headers['user-agent'] as string) || 'ElevatorCRM Client';
 
   try {
-    const { email, password, rememberMe, role } = req.body;
+    const { email, password, rememberMe } = req.body;
 
-    if (!email && !role) {
-      return res.status(400).json({ error: 'Please enter your email address or authorized username.' });
+    if (!email || typeof email !== 'string' || !email.trim()) {
+      return res.status(400).json({ error: 'Please enter your email address.' });
     }
 
-    let targetUser: any = null;
-
-    if (email) {
-      const cleanEmail = email.trim().toLowerCase();
-      const match = await db.select().from(users).where(eq(users.email, cleanEmail)).limit(1);
-      if (match.length > 0) {
-        targetUser = match[0];
-      }
-    } else if (role) {
-      // Role-based lookup fallback
-      const match = await db.select().from(users).where(eq(users.role, role)).limit(1);
-      if (match.length > 0) {
-        targetUser = match[0];
-      }
+    if (!password || typeof password !== 'string') {
+      return res.status(400).json({ error: 'Please enter your password.' });
     }
+
+    const cleanEmail = email.trim().toLowerCase();
+    const match = await db
+      .select()
+      .from(users)
+      .where(sql`LOWER(${users.email}) = ${cleanEmail}`)
+      .limit(1);
+
+    const targetUser = match.length > 0 ? match[0] : null;
 
     if (!targetUser) {
       await logSecurityEvent({
         eventType: 'FAILED_LOGIN',
-        email: email || '',
+        email: cleanEmail,
         ipAddress: ip,
         userAgent: ua,
-        details: `Login rejected: No account found for identifier '${email || role}'`,
+        details: `Login rejected: No account found for identifier '${cleanEmail}'`,
       });
       return res.status(401).json({ error: 'Invalid email address or password. Please verify your credentials and try again.' });
     }
@@ -142,43 +139,47 @@ apiRouter.post('/auth/login', async (req: Request, res: Response) => {
       });
     }
 
-    // Password verification (if password provided)
-    if (password) {
-      const isMatch = verifyPassword(password, targetUser.passwordHash);
-      if (!isMatch) {
-        const attempts = (targetUser.failedLoginAttempts || 0) + 1;
-        let lockout: Date | null = null;
-        if (attempts >= 5) {
-          lockout = new Date(Date.now() + 15 * 60 * 1000); // 15 mins lock
-        }
-        await db
-          .update(users)
-          .set({ failedLoginAttempts: attempts, lockoutUntil: lockout })
-          .where(eq(users.id, targetUser.id));
+    if (!targetUser.passwordHash) {
+      return res.status(401).json({
+        error: 'Password authentication is not configured for this account yet. Please use "Forgot Password?" to set a password or sign in with Google Workspace.',
+      });
+    }
 
-        await logSecurityEvent({
-          eventType: attempts >= 5 ? 'ACCOUNT_LOCKED' : 'FAILED_LOGIN',
-          email: targetUser.email,
-          userId: targetUser.id,
-          ipAddress: ip,
-          userAgent: ua,
-          details: `Password verification failed (Attempt ${attempts}/5)`,
-        });
+    // Strict scrypt password verification
+    const isMatch = verifyPassword(password, targetUser.passwordHash);
+    if (!isMatch) {
+      const attempts = (targetUser.failedLoginAttempts || 0) + 1;
+      let lockout: Date | null = null;
+      if (attempts >= 5) {
+        lockout = new Date(Date.now() + 15 * 60 * 1000); // 15 mins lock
+      }
+      await db
+        .update(users)
+        .set({ failedLoginAttempts: attempts, lockoutUntil: lockout })
+        .where(eq(users.id, targetUser.id));
 
-        if (attempts >= 5) {
-          return res.status(403).json({
-            error: 'Account locked for 15 minutes due to 5 consecutive failed login attempts.',
-          });
-        }
+      await logSecurityEvent({
+        eventType: attempts >= 5 ? 'ACCOUNT_LOCKED' : 'FAILED_LOGIN',
+        email: targetUser.email,
+        userId: targetUser.id,
+        ipAddress: ip,
+        userAgent: ua,
+        details: `Password verification failed (Attempt ${attempts}/5)`,
+      });
 
-        return res.status(401).json({
-          error: `Invalid email address or password. (${5 - attempts} attempts remaining before temporary lockout).`,
+      if (attempts >= 5) {
+        return res.status(403).json({
+          error: 'Account locked for 15 minutes due to 5 consecutive failed login attempts.',
         });
       }
+
+      return res.status(401).json({
+        error: `Invalid email address or password. (${5 - attempts} attempts remaining before temporary lockout).`,
+      });
     }
 
     // Clear failed attempts on successful login
-    if (targetUser.failedLoginAttempts > 0) {
+    if (targetUser.failedLoginAttempts > 0 || targetUser.lockoutUntil) {
       await db
         .update(users)
         .set({ failedLoginAttempts: 0, lockoutUntil: null })
@@ -241,6 +242,158 @@ apiRouter.post('/auth/login', async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error('Login error:', error);
     res.status(500).json({ error: error.message || 'Login failed' });
+  }
+});
+
+// Google Workspace / Firebase Auth SSO Synchronization
+apiRouter.post('/auth/sync-google', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Not authenticated' });
+    }
+    const ip = req.headers['x-forwarded-for']?.toString().split(',')[0] || req.socket.remoteAddress || '127.0.0.1';
+
+    await logUserActivity({
+      userId: req.user.id,
+      sessionId: req.sessionId,
+      eventType: 'Login',
+      moduleName: 'Authentication',
+      pagePath: '/login',
+      actionName: `Authenticated via Firebase Auth as ${req.user.role}`,
+      result: 'Success',
+      metadata: { role: req.user.role, provider: 'firebase' },
+    });
+
+    await logAuditEvent({
+      userId: req.user.id,
+      userName: req.user.name,
+      userRole: req.user.role,
+      action: 'LOGIN_SSO',
+      entityType: 'AUTH',
+      entityId: req.sessionId,
+      details: `User signed in via Firebase Auth (${req.user.role}) from ${ip}`,
+      ipAddress: ip,
+    });
+
+    res.json({
+      user: req.user,
+      token: req.sessionId || '',
+      sessionId: req.sessionId || '',
+      redirectTab: 'dashboard',
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to sync authenticated user' });
+  }
+});
+
+// Authenticated Role Persona Switcher (requires active authenticated session)
+apiRouter.post('/auth/switch-role', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Authentication required to switch roles.' });
+    }
+
+    const validRoles: UserRole[] = [
+      'admin',
+      'manager',
+      'executive',
+      'telecaller',
+      'engineer',
+      'commercial',
+      'director',
+      'customer',
+    ];
+    const requestedRole = String(req.body?.role || '').trim() as UserRole;
+
+    if (!validRoles.includes(requestedRole)) {
+      return res.status(400).json({ error: 'Invalid CRM role selected.' });
+    }
+
+    const candidates = await db
+      .select()
+      .from(users)
+      .where(and(eq(users.role, requestedRole), eq(users.isActive, true)))
+      .orderBy(asc(users.id))
+      .limit(1);
+
+    if (candidates.length === 0) {
+      return res.status(404).json({ error: `No active user account found for role "${requestedRole}".` });
+    }
+
+    const targetUser = candidates[0];
+    const now = new Date();
+    const ip = req.headers['x-forwarded-for']?.toString().split(',')[0] || req.socket.remoteAddress || '127.0.0.1';
+    const ua = req.headers['user-agent'] || 'Unknown Browser';
+
+    // Close previous session cleanly if switching to a different account
+    if (req.sessionId) {
+      const prevSessions = await db
+        .select()
+        .from(userSessions)
+        .where(eq(userSessions.sessionId, req.sessionId))
+        .limit(1);
+
+      if (prevSessions.length > 0 && prevSessions[0].sessionStatus === 'Active') {
+        const prev = prevSessions[0];
+        const duration = Math.max(1, Math.round((now.getTime() - new Date(prev.loginAt).getTime()) / 1000));
+        await db
+          .update(userSessions)
+          .set({
+            sessionStatus: 'Logged Out',
+            logoutAt: now,
+            logoutReason: `Switched role to ${requestedRole}`,
+            sessionDurationSeconds: duration,
+            updatedAt: now,
+          })
+          .where(eq(userSessions.id, prev.id));
+      }
+    }
+
+    const sessionId = generateSessionId();
+    await db.insert(userSessions).values({
+      userId: targetUser.id,
+      sessionId,
+      loginAt: now,
+      lastActivityAt: now,
+      sessionStatus: 'Active',
+      ipAddress: ip,
+      userAgent: ua,
+    });
+
+    await logUserActivity({
+      userId: targetUser.id,
+      sessionId,
+      eventType: 'Role Switch',
+      moduleName: 'Authentication',
+      pagePath: '/dashboard',
+      actionName: `Switched active CRM role from ${req.user.role} to ${targetUser.role}`,
+      result: 'Success',
+      metadata: { previousUserId: req.user.id, previousRole: req.user.role, newRole: targetUser.role },
+    });
+
+    await logAuditEvent({
+      userId: targetUser.id,
+      userName: targetUser.name,
+      userRole: targetUser.role,
+      action: 'ROLE_SWITCH',
+      entityType: 'AUTH',
+      entityId: sessionId,
+      details: `${req.user.name} (${req.user.role}) switched active workspace persona to ${targetUser.name} (${targetUser.role})`,
+      ipAddress: ip,
+    });
+
+    const permissions = await loadUserPermissions(targetUser.role, targetUser.customPermissions);
+    const { passwordHash: _omittedHash, ...safeUser } = targetUser;
+
+    res.json({
+      user: { ...safeUser, permissions },
+      sessionId,
+      token: sessionId,
+      redirectTab: 'dashboard',
+    });
+  } catch (error: any) {
+    console.error('Switch role error:', error);
+    res.status(500).json({ error: error.message || 'Failed to switch role' });
   }
 });
 
@@ -487,18 +640,20 @@ apiRouter.get('/users', requireAuth, async (req: AuthRequest, res: Response) => 
 // Admin creates user
 apiRouter.post('/users', requireAuth, requirePermission('users.manage'), async (req: AuthRequest, res: Response) => {
   try {
-    const { name, email, role, phone, department, region, reportingManagerId } = req.body;
+    const { name, email, password, role, phone, department, region, reportingManagerId } = req.body;
     if (!name || !email) {
       return res.status(400).json({ error: 'Name and email are required' });
     }
 
     const uid = `usr-${Date.now().toString(36)}`;
+    const passwordHash = password && String(password).length >= 6 ? hashPassword(String(password)) : null;
     const [created] = await db
       .insert(users)
       .values({
         uid,
         name,
         email: email.trim().toLowerCase(),
+        passwordHash,
         role: role || 'executive',
         phone: phone || null,
         department: department || 'Sales',
@@ -841,7 +996,7 @@ apiRouter.get('/dashboard/metrics', requireAuth, async (req: AuthRequest, res: R
 
 apiRouter.get('/leads', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const { search, status, source, location, assignedTo, sort, order } = req.query;
+    const { search, status, source, location, assignedTo, startDate, endDate, sort, order } = req.query;
     const userRole = req.user?.role;
     const userId = req.user?.id || 0;
 
@@ -897,6 +1052,14 @@ apiRouter.get('/leads', requireAuth, async (req: AuthRequest, res: Response) => 
 
     if (assignedTo && assignedTo !== 'all') {
       conditions.push(eq(leads.assignedUserId, parseInt(String(assignedTo), 10)));
+    }
+
+    if (startDate && /^\d{4}-\d{2}-\d{2}$/.test(String(startDate))) {
+      conditions.push(sql`DATE(${leads.createdAt}) >= ${String(startDate)}::date`);
+    }
+
+    if (endDate && /^\d{4}-\d{2}-\d{2}$/.test(String(endDate))) {
+      conditions.push(sql`DATE(${leads.createdAt}) <= ${String(endDate)}::date`);
     }
 
     let query = db
@@ -1674,7 +1837,7 @@ apiRouter.delete('/enquiries/:id', requireAuth, requireRole(['admin']), async (r
 
 apiRouter.get('/quotations', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const { status, assignedTo, search } = req.query;
+    const { status, assignedTo, search, startDate, endDate } = req.query;
     const userRole = req.user?.role;
     const userId = req.user?.id || 0;
 
@@ -1709,6 +1872,16 @@ apiRouter.get('/quotations', requireAuth, async (req: AuthRequest, res: Response
           like(quotations.customerName, q),
           like(quotations.projectName, q)
         )
+      );
+    }
+    if (startDate && /^\d{4}-\d{2}-\d{2}$/.test(String(startDate))) {
+      conditions.push(
+        sql`COALESCE(NULLIF(${quotations.quotationDate}, '')::date, DATE(${quotations.createdAt})) >= ${String(startDate)}::date`
+      );
+    }
+    if (endDate && /^\d{4}-\d{2}-\d{2}$/.test(String(endDate))) {
+      conditions.push(
+        sql`COALESCE(NULLIF(${quotations.quotationDate}, '')::date, DATE(${quotations.createdAt})) <= ${String(endDate)}::date`
       );
     }
 

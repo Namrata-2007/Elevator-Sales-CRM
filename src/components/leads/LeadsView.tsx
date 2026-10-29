@@ -22,6 +22,7 @@ import {
 import { api, formatCurrency, formatDate } from '../../lib/api.ts';
 import { Lead, User, LeadStatus, LeadSource, BuildingType } from '../../types/crm.ts';
 import { StatusBadge } from '../common/StatusBadge.tsx';
+import { DateRangeFilter, DateRangeValue } from '../common/DateRangeFilter.tsx';
 import { useToast } from '../../context/ToastContext.tsx';
 import { useAuth } from '../../context/AuthContext.tsx';
 
@@ -61,6 +62,11 @@ export const LeadsView: React.FC<LeadsViewProps> = ({
   const [statusFilter, setStatusFilter] = useState('all');
   const [sourceFilter, setSourceFilter] = useState('all');
   const [assignedFilter, setAssignedFilter] = useState('all');
+  const [dateRange, setDateRange] = useState<DateRangeValue>({
+    preset: 'all',
+    startDate: '',
+    endDate: '',
+  });
   const [sortField, setSortField] = useState('createdAt');
   const [sortOrder, setSortOrder] = useState('desc');
 
@@ -102,6 +108,8 @@ export const LeadsView: React.FC<LeadsViewProps> = ({
       if (statusFilter !== 'all') params.status = statusFilter;
       if (sourceFilter !== 'all') params.source = sourceFilter;
       if (assignedFilter !== 'all') params.assignedTo = assignedFilter;
+      if (dateRange.startDate) params.startDate = dateRange.startDate;
+      if (dateRange.endDate) params.endDate = dateRange.endDate;
       params.sort = sortField;
       params.order = sortOrder;
 
@@ -126,7 +134,7 @@ export const LeadsView: React.FC<LeadsViewProps> = ({
   useEffect(() => {
     fetchLeads();
     fetchUsers();
-  }, [statusFilter, sourceFilter, assignedFilter, sortField, sortOrder]);
+  }, [statusFilter, sourceFilter, assignedFilter, dateRange.startDate, dateRange.endDate, sortField, sortOrder]);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -371,6 +379,12 @@ export const LeadsView: React.FC<LeadsViewProps> = ({
             <option value="status-asc">By Status</option>
           </select>
         </div>
+
+        <DateRangeFilter
+          label="Lead Created"
+          value={dateRange}
+          onChange={setDateRange}
+        />
       </div>
 
       {/* Leads Table */}

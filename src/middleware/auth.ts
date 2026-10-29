@@ -257,59 +257,59 @@ export const requireAuth = async (
       }
     }
 
-    // 2. Demo User Fallback (`demo-...` or `user-...`)
-    if (!targetUser && (token.startsWith('demo-') || token.startsWith('user-'))) {
-      const cleanUid = token.replace('demo-', '');
-      const existingUser = await db.select().from(users).where(eq(users.uid, cleanUid)).limit(1);
-      if (existingUser.length > 0) {
-        targetUser = existingUser[0];
-      }
-    }
-
-    // 3. Firebase Auth Token Fallback
-    if (!targetUser) {
+    // 2. Firebase Auth ID Token Verification
+    if (!targetUser && !token.startsWith('sess_')) {
       try {
         const decodedToken = await adminAuth.verifyIdToken(token);
         const { uid, email, name } = decodedToken;
-        const safeEmail = email || `${uid}@apexelevators.com`;
+        const safeEmail = (email || `${uid}@apexelevators.com`).trim().toLowerCase();
         const safeName = name || safeEmail.split('@')[0];
 
-        const existing = await db.select().from(users).where(eq(users.uid, uid)).limit(1);
-        if (existing.length > 0) {
-          targetUser = existing[0];
+        const existingByUid = await db.select().from(users).where(eq(users.uid, uid)).limit(1);
+        if (existingByUid.length > 0) {
+          targetUser = existingByUid[0];
         } else {
-          // Auto-create user on first login
-          const isNamrata = safeEmail.toLowerCase().includes('namrata');
-          const assignedRole: UserRole = isNamrata ? 'admin' : 'executive';
+          // Check if an authorized user record already exists by email (case-insensitive)
+          const existingByEmail = await db
+            .select()
+            .from(users)
+            .where(sql`LOWER(${users.email}) = ${safeEmail}`)
+            .limit(1);
 
-          const [newUser] = await db
-            .insert(users)
-            .values({
-              uid,
-              email: safeEmail,
-              name: safeName,
-              role: assignedRole,
-              department: assignedRole === 'admin' ? 'Management' : 'Field Sales',
-              isActive: true,
-            })
-            .returning();
+          if (existingByEmail.length > 0) {
+            const [linkedUser] = await db
+              .update(users)
+              .set({ uid, updatedAt: now })
+              .where(eq(users.id, existingByEmail[0].id))
+              .returning();
+            targetUser = linkedUser || existingByEmail[0];
+          } else {
+            // Provision standard non-privileged account on first verified SSO login
+            const [newUser] = await db
+              .insert(users)
+              .values({
+                uid,
+                email: safeEmail,
+                name: safeName,
+                role: 'executive',
+                department: 'Field Sales',
+                isActive: true,
+              })
+              .returning();
 
-          targetUser = newUser;
+            targetUser = newUser;
+          }
         }
-      } catch {
-        // Fallback for UID directly
-        const byUid = await db.select().from(users).where(eq(users.uid, token)).limit(1);
-        if (byUid.length > 0) {
-          targetUser = byUid[0];
-        }
+      } catch (verifyErr: any) {
+        console.warn('Firebase ID token verification failed:', verifyErr?.message || verifyErr);
       }
     }
 
     if (!targetUser) {
-      return res.status(401).json({ error: 'Unauthorized: Session is invalid or user not found' });
+      return res.status(401).json({ error: 'Unauthorized: Invalid or expired authentication session. Please sign in again.' });
     }
 
-    // Reject deactivated users immediately (Requirement 6 & Acceptance Test 11)
+    // Reject deactivated users immediately
     if (!targetUser.isActive) {
       if (sessionRecord) {
         await db
@@ -318,37 +318,50 @@ export const requireAuth = async (
           .where(eq(userSessions.id, sessionRecord.id));
       }
       return res.status(403).json({
-        error: 'Forbidden: Account has been deactivated. Please contact your system administrator.',
+        error: 'This account has been deactivated. Please contact your system administrator.',
       });
     }
 
-    // Ensure session record exists in user_sessions for legacy/demo tokens
+    // Ensure an active session record exists in user_sessions for verified Firebase Auth sessions
     if (!sessionRecord) {
-      const sessId = headerSessionId || (token.startsWith('sess_') ? token : `sess_legacy_${targetUser.id}`);
-      const existingSess = await db
-        .select()
-        .from(userSessions)
-        .where(eq(userSessions.sessionId, sessId))
-        .limit(1);
+      if (headerSessionId && headerSessionId.startsWith('sess_')) {
+        const byHeader = await db
+          .select()
+          .from(userSessions)
+          .where(and(eq(userSessions.sessionId, headerSessionId), eq(userSessions.userId, targetUser.id)))
+          .limit(1);
+        if (byHeader.length > 0 && byHeader[0].sessionStatus === 'Active') {
+          sessionRecord = byHeader[0];
+        }
+      }
 
-      if (existingSess.length > 0) {
-        sessionRecord = existingSess[0];
-      } else {
-        const ip = req.headers['x-forwarded-for']?.toString().split(',')[0] || req.socket.remoteAddress || '127.0.0.1';
-        const ua = req.headers['user-agent'] || 'Browser Client';
-        const [newSess] = await db
-          .insert(userSessions)
-          .values({
-            userId: targetUser.id,
-            sessionId: sessId,
-            loginAt: now,
-            lastActivityAt: now,
-            sessionStatus: 'Active',
-            ipAddress: ip,
-            userAgent: ua,
-          })
-          .returning();
-        sessionRecord = newSess;
+      if (!sessionRecord) {
+        const existingActive = await db
+          .select()
+          .from(userSessions)
+          .where(and(eq(userSessions.userId, targetUser.id), eq(userSessions.sessionStatus, 'Active')))
+          .limit(1);
+
+        if (existingActive.length > 0) {
+          sessionRecord = existingActive[0];
+        } else {
+          const ip = req.headers['x-forwarded-for']?.toString().split(',')[0] || req.socket.remoteAddress || '127.0.0.1';
+          const ua = req.headers['user-agent'] || 'Browser Client';
+          const freshSessId = `sess_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 14)}`;
+          const [newSess] = await db
+            .insert(userSessions)
+            .values({
+              userId: targetUser.id,
+              sessionId: freshSessId,
+              loginAt: now,
+              lastActivityAt: now,
+              sessionStatus: 'Active',
+              ipAddress: ip,
+              userAgent: ua,
+            })
+            .returning();
+          sessionRecord = newSess;
+        }
       }
     }
 

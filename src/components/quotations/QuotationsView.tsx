@@ -31,6 +31,7 @@ import {
   QuotationStatus,
 } from '../../types/crm.ts';
 import { StatusBadge } from '../common/StatusBadge.tsx';
+import { DateRangeFilter, DateRangeValue } from '../common/DateRangeFilter.tsx';
 import { useToast } from '../../context/ToastContext.tsx';
 import { useAuth } from '../../context/AuthContext.tsx';
 
@@ -65,6 +66,11 @@ export const QuotationsView: React.FC<QuotationsViewProps> = ({ initialEnquiry }
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [assignedFilter, setAssignedFilter] = useState('all');
+  const [dateRange, setDateRange] = useState<DateRangeValue>({
+    preset: 'all',
+    startDate: '',
+    endDate: '',
+  });
 
   // Modals
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
@@ -110,6 +116,8 @@ export const QuotationsView: React.FC<QuotationsViewProps> = ({ initialEnquiry }
       if (search) params.search = search;
       if (statusFilter !== 'all') params.status = statusFilter;
       if (assignedFilter !== 'all') params.assignedTo = assignedFilter;
+      if (dateRange.startDate) params.startDate = dateRange.startDate;
+      if (dateRange.endDate) params.endDate = dateRange.endDate;
 
       const [qData, enqData, leadData, uData] = await Promise.all([
         api.getQuotations(params),
@@ -131,7 +139,7 @@ export const QuotationsView: React.FC<QuotationsViewProps> = ({ initialEnquiry }
 
   useEffect(() => {
     loadData();
-  }, [statusFilter, assignedFilter]);
+  }, [statusFilter, assignedFilter, dateRange.startDate, dateRange.endDate]);
 
   const openCreateModal = (prefillEnq?: Enquiry | null) => {
     setEditingQuote(null);
@@ -309,58 +317,69 @@ export const QuotationsView: React.FC<QuotationsViewProps> = ({ initialEnquiry }
       </div>
 
       {/* Filter Toolbar */}
-      <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs flex items-center gap-3 flex-wrap text-xs">
-        <div className="flex items-center gap-1.5 text-slate-500 font-medium">
-          <Filter className="w-3.5 h-3.5" /> Filter by:
+      <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs space-y-3">
+        <div className="flex items-center gap-3 flex-wrap text-xs">
+          <div className="flex items-center gap-1.5 text-slate-500 font-medium">
+            <Filter className="w-3.5 h-3.5" /> Filter by:
+          </div>
+
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+            className="bg-slate-100 border border-slate-200 text-slate-700 rounded-lg px-2.5 py-1.5 font-medium"
+          >
+            <option value="all">All Quotation Statuses</option>
+            {STATUS_OPTIONS.map((st) => (
+              <option key={st} value={st}>
+                {st}
+              </option>
+            ))}
+          </select>
+
+          <select
+            value={assignedFilter}
+            onChange={(e) => setAssignedFilter(e.target.value)}
+            className="bg-slate-100 border border-slate-200 text-slate-700 rounded-lg px-2.5 py-1.5 font-medium"
+          >
+            <option value="all">All Sales Executives</option>
+            {usersList.map((u) => (
+              <option key={u.id} value={u.id}>
+                {u.name}
+              </option>
+            ))}
+          </select>
+
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              loadData();
+            }}
+            className="ml-auto flex items-center gap-1.5"
+          >
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search quotations..."
+                className="pl-8 pr-3 py-1.5 bg-slate-100 border border-slate-200 rounded-lg text-xs focus:outline-none focus:border-blue-500"
+              />
+            </div>
+            <button
+              type="submit"
+              className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg font-medium text-xs transition-colors"
+            >
+              Search
+            </button>
+          </form>
         </div>
 
-        <select
-          value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value)}
-          className="bg-slate-100 border border-slate-200 text-slate-700 rounded-lg px-2.5 py-1.5 font-medium"
-        >
-          <option value="all">All Quotation Statuses</option>
-          {STATUS_OPTIONS.map((st) => (
-            <option key={st} value={st}>
-              {st}
-            </option>
-          ))}
-        </select>
-
-        <select
-          value={assignedFilter}
-          onChange={(e) => setAssignedFilter(e.target.value)}
-          className="bg-slate-100 border border-slate-200 text-slate-700 rounded-lg px-2.5 py-1.5 font-medium"
-        >
-          <option value="all">All Sales Executives</option>
-          {usersList.map((u) => (
-            <option key={u.id} value={u.id}>
-              {u.name}
-            </option>
-          ))}
-        </select>
-
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            loadData();
-          }}
-          className="ml-auto flex items-center gap-1"
-        >
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search quotations..."
-            className="px-3 py-1.5 bg-slate-100 border border-slate-200 rounded-lg text-xs"
-          />
-          <button
-            type="submit"
-            className="px-3 py-1.5 bg-slate-900 text-white rounded-lg font-medium text-xs"
-          >
-            Search
-          </button>
-        </form>
+        <DateRangeFilter
+          label="Quotation Date"
+          value={dateRange}
+          onChange={setDateRange}
+        />
       </div>
 
       {/* Quotations Table */}

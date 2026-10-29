@@ -1,5 +1,6 @@
 import {
   User,
+  UserRole,
   Lead,
   SiteVisit,
   Enquiry,
@@ -17,8 +18,31 @@ import {
   MonitoringSummary,
 } from '../types/crm.ts';
 
-function getToken(): string | null {
-  return localStorage.getItem('elevator_crm_token');
+const TOKEN_KEY = 'elevator_crm_token';
+const SESSION_KEY = 'elevator_crm_session_id';
+
+export function getStoredToken(): string | null {
+  return localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY);
+}
+
+export function getStoredSessionId(): string | null {
+  return localStorage.getItem(SESSION_KEY) || sessionStorage.getItem(SESSION_KEY);
+}
+
+export function persistAuthSession(token: string, sessionId: string, rememberMe: boolean = true): void {
+  clearAuthSession();
+  const storage = rememberMe ? localStorage : sessionStorage;
+  storage.setItem(TOKEN_KEY, token);
+  if (sessionId) {
+    storage.setItem(SESSION_KEY, sessionId);
+  }
+}
+
+export function clearAuthSession(): void {
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(SESSION_KEY);
+  sessionStorage.removeItem(TOKEN_KEY);
+  sessionStorage.removeItem(SESSION_KEY);
 }
 
 export function formatCurrency(amount?: number | null, currency: string = 'INR'): string {
@@ -81,22 +105,43 @@ export function formatDuration(seconds: number): string {
 }
 
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
-  const token = getToken();
+  const token = getStoredToken();
+  const sessId = getStoredSessionId();
   const headers = new Headers(options.headers || {});
   headers.set('Content-Type', 'application/json');
   if (token) {
     headers.set('Authorization', `Bearer ${token}`);
+  }
+  if (sessId) {
+    headers.set('x-session-id', sessId);
+  } else if (token) {
     headers.set('x-session-id', token);
   }
 
-  const res = await fetch(`/api${endpoint}`, {
-    ...options,
-    headers,
-  });
+  let res: Response;
+  try {
+    res = await fetch(`/api${endpoint}`, {
+      ...options,
+      headers,
+    });
+  } catch (networkErr: any) {
+    throw new Error(
+      `Network error connecting to CRM server${networkErr?.message ? `: ${networkErr.message}` : ''}`
+    );
+  }
 
   if (!res.ok) {
-    const errorData = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(errorData.error || `HTTP ${res.status}: ${res.statusText}`);
+    const rawText = await res.text().catch(() => '');
+    let parsedError = '';
+    if (rawText) {
+      try {
+        const json = JSON.parse(rawText);
+        parsedError = json.error || json.message || '';
+      } catch {
+        parsedError = rawText.slice(0, 200);
+      }
+    }
+    throw new Error(parsedError || `HTTP ${res.status}: ${res.statusText}`);
   }
 
   return res.json();
@@ -105,7 +150,7 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
 export const api = {
   // Auth
   getMe: () => request<{ user: User; sessionId?: string }>('/auth/me'),
-  login: (data: { email?: string; password?: string; rememberMe?: boolean; role?: string }) =>
+  login: (data: { email: string; password: string; rememberMe?: boolean }) =>
     request<{ user: User; token: string; sessionId: string; redirectTab: string }>('/auth/login', {
       method: 'POST',
       body: JSON.stringify(data),
@@ -144,7 +189,15 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
-  syncGoogle: () => request<{ user: User; token: string }>('/auth/sync-google', { method: 'POST' }),
+  syncGoogle: () =>
+    request<{ user: User; token: string; sessionId?: string; redirectTab?: string }>('/auth/sync-google', {
+      method: 'POST',
+    }),
+  switchRole: (role: UserRole) =>
+    request<{ user: User; token: string; sessionId: string; redirectTab: string }>('/auth/switch-role', {
+      method: 'POST',
+      body: JSON.stringify({ role }),
+    }),
 
   // Users
   getUsers: () => request<User[]>('/users'),

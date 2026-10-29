@@ -10,21 +10,23 @@ export function hashPassword(password: string): string {
 }
 
 /**
- * Timing-safe password verification
+ * Timing-safe password verification against stored salt:scryptHash
  */
 export function verifyPassword(password: string, storedHash?: string | null): boolean {
-  if (!storedHash) {
-    // Standard default password fallback for seeded demo accounts
-    return password === 'ApexElevator@2026' || password === 'Apex@123';
+  if (!password || !storedHash) {
+    return false;
   }
 
   try {
     const [salt, key] = storedHash.split(':');
     if (!salt || !key) {
-      return password === storedHash || password === 'ApexElevator@2026';
+      return false;
     }
     const derivedKey = crypto.scryptSync(password, salt, 64);
     const keyBuffer = Buffer.from(key, 'hex');
+    if (derivedKey.length !== keyBuffer.length) {
+      return false;
+    }
     return crypto.timingSafeEqual(derivedKey, keyBuffer);
   } catch (err) {
     console.error('Password verification error:', err);
